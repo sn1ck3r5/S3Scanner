@@ -51,6 +51,24 @@ def checkAcl(bucket):
     return {"found": True, "acls": {"allUsers": allUsersGrants, "authUsers": authUsersGrants}}
 
 
+def checkAuthUserListFiles(bucketName):
+    s3 = boto3.resource('s3')
+    
+    bucket = s3.Bucket(bucketName)
+    
+    try:
+        for obj in bucket.objects.limit(count=2):
+            nothing = obj.key
+        return True
+    except client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == "AccessDenied":
+            return False
+        elif e.response['Error']['Code'] == "AllAccessDisabled":
+            return False
+        else:
+            raise e
+
+
 def checkAuthUserReadAcl(bucket):
     authUsersGrants = []
 
