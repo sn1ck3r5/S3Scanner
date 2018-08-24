@@ -2,6 +2,7 @@ import sh
 import os
 import boto3
 import requests
+from botocore.handlers import disable_signing
 
 sizeCheckTimeout = 8    # How long to wait for getBucketSize to return
 awsCredsConfigured = True
@@ -30,8 +31,8 @@ def checkAcl(bucket):
         bucket_acl = s3.BucketAcl(bucket)
         bucket_acl.load()
     except client.exceptions.NoSuchBucket:
-        return {"found": False, "acls": {}}
-
+        print("[checkAcl] Caught a NoSuchBucket exception")
+        return
     except client.exceptions.ClientError as e:
         if e.response['Error']['Code'] == "AccessDenied":
             return {"found": True, "acls": "AccessDenied"}
@@ -48,6 +49,28 @@ def checkAcl(bucket):
                 authUsersGrants.append(grant['Permission'])
 
     return {"found": True, "acls": {"allUsers": allUsersGrants, "authUsers": authUsersGrants}}
+
+
+def checkAuthUserReadAcl(bucket):
+    authUsersGrants = []
+
+    s3 = boto3.resource('s3')
+
+    try:
+        bucket_acl = s3.BucketAcl(bucket)
+        bucket_acl.load()
+    except client.exceptions.NoSuchBucket:
+        print("[checkAcl] Caught a NoSuchBucket exception")
+        return False
+    except client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == "AccessDenied":
+            return False
+        elif e.response['Error']['Code'] == "AllAccessDisabled":
+            return False
+        else:
+            raise e
+
+    return True
 
 
 def checkAwsCreds():
@@ -68,7 +91,7 @@ def checkAwsCreds():
     return True
 
 
-def checkBucket(inBucket, slog, flog, argsDump, argsList):
+def checkBucket(inBucket):
     # Determine what kind of input we're given. Options:
     #   bucket name   i.e. mybucket
     #   domain name   i.e. flaws.cloud
@@ -85,10 +108,8 @@ def checkBucket(inBucket, slog, flog, argsDump, argsList):
     valid = checkBucketName(bucket)
 
     if not valid:
-        message = "{0:>11} : {1}".format("[invalid]", bucket)
-        slog.error(message)
-        # continue
-        return
+        # Invalid bucket name
+        return False
 
     if awsCredsConfigured:
         b = checkAcl(bucket)
@@ -98,22 +119,17 @@ def checkBucket(inBucket, slog, flog, argsDump, argsList):
 
     if b["found"]:
 
-        size = getBucketSize(bucket)  # Try to get the size of the bucket
+        # size = getBucketSize(bucket)  # Try to get the size of the bucket
 
-        message = "{0:>11} : {1}".format("[found]", bucket + " | " + size + " | ACLs: " + str(b["acls"]))
-        slog.info(message)
-        flog.debug(bucket)
+        # message = "{0:>11} : {1}".format("[found]", bucket + " | " + size + " | ACLs: " + str(b["acls"]))
 
-        if argsDump:
-            if size not in ["AccessDenied", "AllAccessDisabled"]:
-                slog.info("{0:>11} : {1} - {2}".format("[found]", bucket, "Attempting to dump...this may take a while."))
-                dumpBucket(bucket)
-        if argsList:
-            if str(b["acls"]) not in ["AccessDenied", "AllAccessDisabled"]:
-                listBucket(bucket)
+        # if argsList:
+        #     if str(b["acls"]) not in ["AccessDenied", "AllAccessDisabled"]:
+        #         listBucket(bucket)
+        return True
     else:
-        message = "{0:>11} : {1}".format("[not found]", bucket)
-        slog.error(message)
+        # valid bucket name, but not found
+        return False
 
 
 def checkBucketName(bucketName):
@@ -129,6 +145,31 @@ def checkBucketName(bucketName):
         if char.lower() not in "abcdefghijklmnopqrstuvwxyz0123456789.-":
             return False
     return True
+
+
+def checkAnonListFiles(bucketName, triesLeft=2):
+    """ Does a simple GET request with the Requests library and interprets the results.
+    bucketName - A domain name without protocol (http[s]) """
+
+    if triesLeft == 0:
+        return False
+
+    bucketUrl = 'http://' + bucketName + '.s3.amazonaws.com'
+
+    r = requests.head(bucketUrl)
+
+    if r.status_code == 200:    # Successfully found a bucket!
+        return True
+    elif r.status_code == 403:  # Bucket exists, but we're not allowed to LIST it.
+        return False
+    elif r.status_code == 404:  # This is definitely not a valid bucket name.
+        return False
+    elif r.status_code == 503:
+        return checkBucketWithoutCreds(bucketName, triesLeft - 1)
+    else:
+        raise ValueError("Got an unhandled status code back: " + str(r.status_code) + " for bucket: " + bucketName +
+                         ". Please open an issue at: https://github.com/sa7mon/s3scanner/issues and include this info.")
+
 
 
 def checkBucketWithoutCreds(bucketName, triesLeft=2):
